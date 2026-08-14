@@ -1,5 +1,6 @@
 /*!
- * Copyright (c) 2017 Microsoft Corporation. All rights reserved.
+ * Copyright (c) 2017-2026 Microsoft Corporation. All rights reserved.
+ * Copyright (c) 2017-2026 The LightGBM developers. All rights reserved.
  * Licensed under the MIT License. See LICENSE file in the project root for license information.
  *
  * \brief This file can either be read and passed to an OpenCL compiler directly,
@@ -387,7 +388,7 @@ __kernel void histogram256(__global const uchar4* feature_data_base,
     const uint subglobal_tid  = gtid - group_feature * subglobal_size;
     // extract feature mask, when a byte is set to 0, that feature is disabled
     #if ENABLE_ALL_FEATURES == 1
-    // hopefully the compiler will propogate the constants and eliminate all branches
+    // hopefully the compiler will propagate the constants and eliminate all branches
     uchar4 feature_mask = (uchar4)(0xff, 0xff, 0xff, 0xff);
     #else
     uchar4 feature_mask = feature_masks[group_feature];

@@ -2,11 +2,9 @@
 """Tests for lightgbm.dask module"""
 
 import inspect
-import random
+import re
 import socket
 from itertools import groupby
-from os import getenv
-from platform import machine
 from sys import platform
 from urllib.parse import urlparse
 
@@ -15,14 +13,16 @@ from sklearn.metrics import accuracy_score, r2_score
 
 import lightgbm as lgb
 
-from .utils import sklearn_multiclass_custom_objective
+from .utils import (
+    BuildInfo,
+    np_assert_array_equal,
+    sklearn_multiclass_custom_objective,
+)
 
-if not platform.startswith("linux"):
-    pytest.skip("lightgbm.dask is currently supported in Linux environments", allow_module_level=True)
-if machine() != "x86_64":
-    pytest.skip("lightgbm.dask tests are currently skipped on some architectures like arm64", allow_module_level=True)
-if not lgb.compat.DASK_INSTALLED:
-    pytest.skip("Dask is not installed", allow_module_level=True)
+if platform in {"cygwin", "win32"}:
+    pytest.skip("lightgbm.dask is not currently supported on Windows", allow_module_level=True)
+
+dask = pytest.importorskip("dask")
 
 import dask.array as da
 import dask.dataframe as dd
@@ -56,9 +56,9 @@ task_to_local_factory = {
 }
 
 pytestmark = [
-    pytest.mark.skipif(getenv("TASK", "") == "mpi", reason="Fails to run with MPI interface"),
-    pytest.mark.skipif(getenv("TASK", "") == "gpu", reason="Fails to run with GPU interface"),
-    pytest.mark.skipif(getenv("TASK", "") == "cuda", reason="Fails to run with CUDA interface"),
+    pytest.mark.skipif(BuildInfo.has_cuda, reason="Fails to run with CUDA interface"),
+    pytest.mark.skipif(BuildInfo.has_gpu, reason="Fails to run with GPU interface"),
+    pytest.mark.skipif(BuildInfo.has_mpi, reason="Fails to run with MPI interface"),
 ]
 
 
@@ -83,7 +83,7 @@ def cluster_three_workers():
     dask_cluster.close()
 
 
-@pytest.fixture()
+@pytest.fixture
 def listen_port():
     listen_port.port += 10
     return listen_port.port
@@ -229,8 +229,8 @@ def _accuracy_score(dy_true, dy_pred):
 def _constant_metric(y_true, y_pred):
     metric_name = "constant_metric"
     value = 0.708
-    is_higher_better = False
-    return metric_name, value, is_higher_better
+    maximize = False
+    return metric_name, value, maximize
 
 
 def _objective_least_squares(y_true, y_pred):
@@ -286,7 +286,7 @@ def test_classifier(output, task, boosting_type, tree_learner, cluster):
         s2 = local_classifier.score(X, y)
 
         if boosting_type == "rf":
-            # https://github.com/microsoft/LightGBM/issues/4118
+            # https://github.com/lightgbm-org/LightGBM/issues/4118
             assert_eq(s1, s2, atol=0.01)
             assert_eq(p1_proba, p2_proba, atol=0.8)
         else:
@@ -299,10 +299,10 @@ def test_classifier(output, task, boosting_type, tree_learner, cluster):
             assert_eq(p1_local, y)
 
         # extra predict() parameters should be passed through correctly
-        with pytest.raises(AssertionError):
+        with pytest.raises(AssertionError):  # noqa: PT011
             assert_eq(p1_raw, p1_first_iter_raw)
 
-        with pytest.raises(AssertionError):
+        with pytest.raises(AssertionError):  # noqa: PT011
             assert_eq(p1_raw, p1_early_stop_raw)
 
         # pref_leaf values should have the right shape
@@ -373,7 +373,7 @@ def test_classifier_pred_contrib(output, task, cluster):
                 # raw scores will probably be different, but at least check that all predicted classes are the same
                 pred_classes = np.argmax(computed_preds.toarray(), axis=1)
                 local_pred_classes = np.argmax(local_preds_with_contrib[i].toarray(), axis=1)
-                np.testing.assert_array_equal(pred_classes, local_pred_classes)
+                np_assert_array_equal(pred_classes, local_pred_classes, strict=True)
             return
 
         preds_with_contrib = preds_with_contrib.compute()
@@ -472,7 +472,7 @@ def test_classifier_custom_objective(output, task, cluster):
         assert_eq(p1_proba, p1_proba_local)
 
 
-def test_machines_to_worker_map_unparseable_host_names():
+def test_machines_to_worker_map_unparsable_host_names():
     workers = {"0.0.0.1:80": {}, "0.0.0.2:80": {}}
     machines = "0.0.0.1:80,0.0.0.2:80"
     with pytest.raises(ValueError, match="Could not parse host name from worker address '0.0.0.1:80'"):
@@ -554,7 +554,7 @@ def test_regressor(output, boosting_type, tree_learner, cluster):
         assert_eq(p2, y, rtol=0.5, atol=50.0)
 
         # extra predict() parameters should be passed through correctly
-        with pytest.raises(AssertionError):
+        with pytest.raises(AssertionError):  # noqa: PT011
             assert_eq(p1_raw, p1_first_iter_raw)
 
         # be sure LightGBM actually used at least one categorical column,
@@ -671,6 +671,13 @@ def test_regressor_custom_objective(output, cluster):
         assert_eq(p2, y, **assert_precision)
 
 
+@pytest.mark.xfail(
+    platform.lower().startswith("darwin"),
+    reason=(
+        "learning-to-rank Dask tests are unreliable on macOS. "
+        "See https://github.com/lightgbm-org/LightGBM/issues/4074#issuecomment-3124996317"
+    ),
+)
 @pytest.mark.parametrize("output", ["array", "dataframe", "dataframe-with-categorical"])
 @pytest.mark.parametrize("group", [None, group_sizes])
 @pytest.mark.parametrize("boosting_type", boosting_types)
@@ -694,7 +701,7 @@ def test_ranker(output, group, boosting_type, tree_learner, cluster):
             client.rebalance()
 
         # use many trees + leaves to overfit, help ensure that Dask data-parallel strategy matches that of
-        # serial learner. See https://github.com/microsoft/LightGBM/issues/3292#issuecomment-671288210.
+        # serial learner. See https://github.com/lightgbm-org/LightGBM/issues/3292#issuecomment-671288210.
         params = {
             "boosting_type": boosting_type,
             "random_state": 42,
@@ -734,10 +741,10 @@ def test_ranker(output, group, boosting_type, tree_learner, cluster):
         assert_eq(rnkvec_dask, rnkvec_dask_local)
 
         # extra predict() parameters should be passed through correctly
-        with pytest.raises(AssertionError):
+        with pytest.raises(AssertionError):  # noqa: PT011
             assert_eq(p1_raw, p1_first_iter_raw)
 
-        with pytest.raises(AssertionError):
+        with pytest.raises(AssertionError):  # noqa: PT011
             assert_eq(p1_raw, p1_early_stop_raw)
 
         # pref_leaf values should have the right shape
@@ -1020,8 +1027,13 @@ def test_training_works_if_client_not_provided_or_set_after_construction(task, c
         assert dask_model.client_ == client
 
         local_model = dask_model.to_local()
-        with pytest.raises(AttributeError):
+        no_client_attr_msg = re.compile(
+            f"{repr(type(local_model).__name__)} object has no attribute '(client|client_)'"
+        )
+
+        with pytest.raises(AttributeError, match=no_client_attr_msg):
             local_model.client
+        with pytest.raises(AttributeError, match=no_client_attr_msg):
             local_model.client_
 
         # should be able to set client after construction
@@ -1044,8 +1056,9 @@ def test_training_works_if_client_not_provided_or_set_after_construction(task, c
         assert dask_model.client_ == client
 
         local_model = dask_model.to_local()
-        with pytest.raises(AttributeError):
+        with pytest.raises(AttributeError, match=no_client_attr_msg):
             local_model.client
+        with pytest.raises(AttributeError, match=no_client_attr_msg):
             local_model.client_
 
 
@@ -1130,8 +1143,12 @@ def test_model_and_local_version_are_picklable_whether_or_not_client_set_explici
             local_model = dask_model.to_local()
 
             assert "client" not in local_model.get_params()
-            with pytest.raises(AttributeError):
+            no_client_attr_msg = re.compile(
+                f"{repr(type(local_model).__name__)} object has no attribute '(client|client_)'"
+            )
+            with pytest.raises(AttributeError, match=no_client_attr_msg):
                 local_model.client
+            with pytest.raises(AttributeError, match=no_client_attr_msg):
                 local_model.client_
 
             tmp_file2 = tmp_path / "model-2.pkl"
@@ -1229,7 +1246,7 @@ def test_errors(cluster):
 
         df = dd.demo.make_timeseries()
         df = df.map_partitions(f, meta=df._meta)
-        with pytest.raises(Exception) as info:
+        with pytest.raises(Exception) as info:  # noqa: PT011, PT012 # error message needs to be coerced to a string
             lgb.dask._train(client=client, data=df, label=df.x, params={}, model_factory=lgb.LGBMClassifier)
             assert "foo" in str(info.value)
 
@@ -1310,7 +1327,10 @@ def test_network_params_not_required_but_respected_if_given(task, listen_port, c
         # model 2 - machines given
         workers = list(client.scheduler_info()["workers"])
         workers_hostname = _get_workers_hostname(cluster)
-        remote_sockets, open_ports = lgb.dask._assign_open_ports_to_workers(client, workers)
+        remote_sockets, open_ports = lgb.dask._assign_open_ports_to_workers(
+            client=client,
+            workers=workers,
+        )
         for s in remote_sockets.values():
             s.release()
         dask_model2 = dask_model_factory(
@@ -1336,7 +1356,7 @@ def test_network_params_not_required_but_respected_if_given(task, listen_port, c
 
 @pytest.mark.parametrize("task", tasks)
 def test_machines_should_be_used_if_provided(task, cluster):
-    pytest.skip("skipping due to timeout issues discussed in https://github.com/microsoft/LightGBM/issues/5390")
+    pytest.skip("skipping due to timeout issues discussed in https://github.com/lightgbm-org/LightGBM/issues/5390")
     with Client(cluster) as client:
         _, _, _, _, dX, dy, _, dg = _create_data(objective=task, output="array", chunk_size=10, group=None)
 
@@ -1358,7 +1378,7 @@ def test_machines_should_be_used_if_provided(task, cluster):
         # test that "machines" is actually respected by creating a socket that uses
         # one of the ports mentioned in "machines"
         error_msg = f"Binding port {open_ports[0]} failed"
-        with pytest.raises(lgb.basic.LightGBMError, match=error_msg):
+        with pytest.raises(lgb.basic.LightGBMError, match=error_msg):  # noqa: PT012
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.bind((workers_hostname, open_ports[0]))
                 dask_model.fit(dX, dy, group=dg)
@@ -1374,26 +1394,42 @@ def test_machines_should_be_used_if_provided(task, cluster):
 
 
 @pytest.mark.parametrize(
-    "classes",
+    ("dask_est", "sklearn_est"),
     [
         (lgb.DaskLGBMClassifier, lgb.LGBMClassifier),
         (lgb.DaskLGBMRegressor, lgb.LGBMRegressor),
         (lgb.DaskLGBMRanker, lgb.LGBMRanker),
     ],
 )
-def test_dask_classes_and_sklearn_equivalents_have_identical_constructors_except_client_arg(classes):
-    dask_spec = inspect.getfullargspec(classes[0])
-    sklearn_spec = inspect.getfullargspec(classes[1])
+def test_dask_classes_and_sklearn_equivalents_have_identical_constructors_except_client_arg(dask_est, sklearn_est):
+    dask_spec = inspect.getfullargspec(dask_est)
+    sklearn_spec = inspect.getfullargspec(sklearn_est)
+
+    # should not allow for any varargs
     assert dask_spec.varargs == sklearn_spec.varargs
+    assert dask_spec.varargs is None
+
+    # the only varkw should be **kwargs,
+    # for pass-through to parent classes' __init__()
     assert dask_spec.varkw == sklearn_spec.varkw
-    assert dask_spec.kwonlyargs == sklearn_spec.kwonlyargs
-    assert dask_spec.kwonlydefaults == sklearn_spec.kwonlydefaults
+    assert dask_spec.varkw == "kwargs"
 
     # "client" should be the only different, and the final argument
-    assert dask_spec.args[:-1] == sklearn_spec.args
-    assert dask_spec.defaults[:-1] == sklearn_spec.defaults
-    assert dask_spec.args[-1] == "client"
-    assert dask_spec.defaults[-1] is None
+    assert dask_spec.kwonlyargs == [*sklearn_spec.kwonlyargs, "client"]
+
+    # default values for all constructor arguments should be identical
+    #
+    # NOTE: if LGBMClassifier / LGBMRanker / LGBMRegressor ever override
+    #       any of LGBMModel's constructor arguments, this will need to be updated
+    assert dask_spec.kwonlydefaults == {**sklearn_spec.kwonlydefaults, "client": None}
+
+    # only positional argument should be 'self'
+    assert dask_spec.args == sklearn_spec.args
+    assert dask_spec.args == ["self"]
+    assert dask_spec.defaults is None
+
+    # get_params() should be identical, except for "client"
+    assert dask_est().get_params() == {**sklearn_est().get_params(), "client": None}
 
 
 @pytest.mark.parametrize(
@@ -1433,7 +1469,8 @@ def test_training_succeeds_when_data_is_dataframe_and_label_is_column_array(task
 
         dy = dy.to_dask_array(lengths=True)
         dy_col_array = dy.reshape(-1, 1)
-        assert len(dy_col_array.shape) == 2 and dy_col_array.shape[1] == 1
+        assert len(dy_col_array.shape) == 2
+        assert dy_col_array.shape[1] == 1
 
         params = {"n_estimators": 1, "num_leaves": 3, "random_state": 0, "time_out": 5}
         model = model_factory(**params)
@@ -1443,7 +1480,7 @@ def test_training_succeeds_when_data_is_dataframe_and_label_is_column_array(task
 
 @pytest.mark.parametrize("task", tasks)
 @pytest.mark.parametrize("output", data_output)
-def test_init_score(task, output, cluster):
+def test_init_score(task, output, cluster, rng):
     if task == "ranking" and output == "scipy_csr_matrix":
         pytest.skip("LGBMRanker is not currently tested on sparse matrices")
 
@@ -1452,20 +1489,35 @@ def test_init_score(task, output, cluster):
 
         model_factory = task_to_dask_factory[task]
 
-        params = {"n_estimators": 1, "num_leaves": 2, "time_out": 5}
-        init_score = random.random()
-        size_factor = 1
+        params = {
+            "n_estimators": 1,
+            "num_leaves": 2,
+            "time_out": 5,
+            "seed": 708,
+            "deterministic": True,
+            "force_row_wise": True,
+            "num_thread": 1,
+        }
+        num_classes = 1
         if task == "multiclass-classification":
-            size_factor = 3  # number of classes
+            num_classes = 3
 
         if output.startswith("dataframe"):
-            init_scores = dy.map_partitions(lambda x: pd.DataFrame([[init_score] * size_factor] * x.size))
+            init_scores = dy.map_partitions(lambda x: pd.DataFrame(rng.uniform(size=(x.size, num_classes))))
         else:
-            init_scores = dy.map_blocks(lambda x: np.full((x.size, size_factor), init_score))
+            init_scores = dy.map_blocks(lambda x: rng.uniform(size=(x.size, num_classes)))
+
         model = model_factory(client=client, **params)
-        model.fit(dX, dy, sample_weight=dw, init_score=init_scores, group=dg)
-        # value of the root node is 0 when init_score is set
-        assert model.booster_.trees_to_dataframe()["value"][0] == 0
+        model.fit(dX, dy, sample_weight=dw, group=dg)
+        pred = model.predict(dX, raw_score=True)
+
+        model_init_score = model_factory(client=client, **params)
+        model_init_score.fit(dX, dy, sample_weight=dw, init_score=init_scores, group=dg)
+        pred_init_score = model_init_score.predict(dX, raw_score=True)
+
+        # check if init score changes predictions
+        with pytest.raises(AssertionError):  # noqa: PT011
+            assert_eq(pred, pred_init_score)
 
 
 def sklearn_checks_to_run():
@@ -1527,11 +1579,104 @@ def test_predict_with_raw_score(task, output, cluster):
             assert_eq(raw_predictions, pred_proba_raw)
 
 
-def test_distributed_quantized_training(cluster):
+@pytest.mark.parametrize("output", data_output)
+@pytest.mark.parametrize("task", tasks)
+def test_predict_returns_expected_dtypes(task, output, cluster):
+    if task == "ranking" and output == "scipy_csr_matrix":
+        pytest.skip("LGBMRanker is not currently tested on sparse matrices")
+
+    with Client(cluster) as client:
+        _, _, _, _, dX, dy, _, dg = _create_data(objective=task, output=output, group=None)
+
+        model_factory = task_to_dask_factory[task]
+        params = {
+            "client": client,
+            "n_estimators": 1,
+            "num_leaves": 2,
+            "time_out": 5,
+            "verbose": -1,
+        }
+        model = model_factory(**params)
+        model.fit(dX, dy, group=dg)
+
+        # use a small sub-sample (to keep the tests fast)
+        if output.startswith("dataframe"):
+            dX_sample = dX.sample(frac=0.001)
+        else:
+            dX_sample = dX[:1,]
+            dX_sample.persist()
+
+        # default predictions:
+        #
+        #  * classification: int64
+        #  * ranking: float64
+        #  * regression: float64
+        #
+        preds = model.predict(dX_sample).compute()
+        if task.endswith("classification"):
+            # preds go through LabelEncoder.inverse_transform() and have the same
+            # dtype as model.classes_ (expected to be an integer type, but exact size
+            # varies across numpy versions and operating systems)
+            assert preds.dtype == model.classes_.dtype
+            assert preds.dtype in (np.int32, np.int64)
+        else:
+            assert preds.dtype == np.float64
+
+        # raw predictions: always float64
+        preds_raw = model.predict(dX_sample, raw_score=True).compute()
+        assert preds_raw.dtype == np.float64
+
+        # pred_contrib: always float64
+        if output.startswith("scipy"):
+            preds_contrib = [arr.compute() for arr in model.predict(dX_sample, pred_contrib=True)]
+            assert all(arr.dtype == np.float64 for arr in preds_contrib)
+        else:
+            preds_contrib = model.predict(dX_sample, pred_contrib=True).compute()
+            assert preds_contrib.dtype == np.float64
+
+        # pred_leavs: always int32
+        preds_leaves = model.predict(dX_sample, pred_leaf=True).compute()
+        assert preds_leaves.dtype == np.int32
+
+
+@pytest.mark.parametrize("output", data_output)
+@pytest.mark.parametrize("use_init_score", [False, True])
+def test_predict_stump(output, use_init_score, cluster, rng):
+    with Client(cluster) as client:
+        _, _, _, _, dX, dy, _, _ = _create_data(objective="binary-classification", n_samples=1_000, output=output)
+
+        params = {"objective": "binary", "n_estimators": 5, "min_data_in_leaf": 1_000}
+
+        if not use_init_score:
+            init_scores = None
+        elif output.startswith("dataframe"):
+            init_scores = dy.map_partitions(lambda x: pd.DataFrame(rng.uniform(size=x.size)))
+        else:
+            init_scores = dy.map_blocks(lambda x: rng.uniform(size=x.size))
+
+        model = lgb.DaskLGBMClassifier(client=client, **params)
+        model.fit(dX, dy, init_score=init_scores)
+        preds_1 = model.predict(dX, raw_score=True, num_iteration=1).compute()
+        preds_all = model.predict(dX, raw_score=True).compute()
+
+        if use_init_score:
+            # if init_score was provided, a model of stumps should predict all 0s
+            all_zeroes = np.full_like(preds_1, fill_value=0.0)
+            assert_eq(preds_1, all_zeroes)
+            assert_eq(preds_all, all_zeroes)
+        else:
+            # if init_score was not provided, prediction for a model of stumps should be
+            # the "average" of the labels
+            y_avg = np.log(dy.mean() / (1.0 - dy.mean()))
+            assert_eq(preds_1, np.full_like(preds_1, fill_value=y_avg))
+            assert_eq(preds_all, np.full_like(preds_all, fill_value=y_avg))
+
+
+def test_distributed_quantized_training(tmp_path, cluster):
     with Client(cluster) as client:
         X, y, w, _, dX, dy, dw, _ = _create_data(objective="regression", output="array")
 
-        np.savetxt("data_dask.csv", np.hstack([np.array([y]).T, X]), fmt="%f,%f,%f,%f,%f")
+        np.savetxt(tmp_path / "data_dask.csv", np.hstack([np.array([y]).T, X]), fmt="%f,%f,%f,%f,%f")
 
         params = {
             "boosting_type": "gbdt",

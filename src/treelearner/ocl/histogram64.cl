@@ -1,5 +1,6 @@
 /*!
- * Copyright (c) 2017 Microsoft Corporation. All rights reserved.
+ * Copyright (c) 2017-2026 Microsoft Corporation. All rights reserved.
+ * Copyright (c) 2017-2026 The LightGBM developers. All rights reserved.
  * Licensed under the MIT License. See LICENSE file in the project root for license information.
  *
  * \brief This file can either be read and passed to an OpenCL compiler directly,
@@ -454,7 +455,7 @@ R""()
 
 
         // prefetch the next iteration variables
-        // we don't need bondary check because if it is out of boundary, ind_next = 0
+        // we don't need boundary check because if it is out of boundary, ind_next = 0
         #ifndef IGNORE_INDICES
         feature4_next = feature_data[ind_next];
         #endif

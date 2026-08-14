@@ -1,5 +1,6 @@
 /*!
- * Copyright (c) 2017 Microsoft Corporation. All rights reserved.
+ * Copyright (c) 2017-2026 Microsoft Corporation. All rights reserved.
+ * Copyright (c) 2017-2026 The LightGBM developers. All rights reserved.
  * Licensed under the MIT License. See LICENSE file in the project root for license information.
  *
  * \brief This file can either be read and passed to an OpenCL compiler directly,
@@ -8,7 +9,7 @@
 #ifndef __OPENCL_VERSION__
 // If we are including this file in C++,
 // the entire source file following (except the last #endif) will become
-// a raw string literal. The extra ")" is just for mathcing parentheses
+// a raw string literal. The extra ")" is just for matching parentheses
 // to make the editor happy. The extra ")" and extra endif will be skipped.
 // DO NOT add anything between here and the next #ifdef, otherwise you need
 // to modify the skip count at the end of this file.
@@ -475,7 +476,7 @@ R""()
 
 
         // prefetch the next iteration variables
-        // we don't need bondary check because if it is out of boundary, ind_next = 0
+        // we don't need boundary check because if it is out of boundary, ind_next = 0
         #ifndef IGNORE_INDICES
         feature4_next = feature_data[ind_next];
         #endif
